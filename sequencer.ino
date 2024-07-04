@@ -1,15 +1,7 @@
-#define STEPS_COUNT 5
-#define TABS 2
+#include "sequencer.h"
 
-// pins
-#define CV_OUT 3
-#define GATE_OUT 10
-#define TEMPO_BUTTON 2
-#define TEMPO_KNOB 0
-#define LIGHT_STARTS 4
-#define TAB_2 13
-#define TAB_2_LED 11
-#define SAVE_TAB 12
+#define STEPS_COUNT 5
+#define TABS 1
 
 unsigned long timer;
 unsigned long current_step_time;
@@ -37,8 +29,15 @@ void print_tabs() {
   }
 }
 
+void read_tab_cv(int tab) {
+  for (int i = 0; i < STEPS_COUNT; i++) {
+    steps[tab][i] = analogRead(i);
+  }
+  Serial.println("tab saved");
+}
+
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(31250);
   
   pinMode(TEMPO_BUTTON, INPUT);
   digitalWrite(TEMPO_BUTTON, HIGH);
@@ -61,30 +60,59 @@ void step_led(int i) {
   digitalWrite(i + LIGHT_STARTS, HIGH);
 }
 
-void read_tab_cv(int tab) {
-  for (int i = 0; i < STEPS_COUNT; i++) {
-    steps[tab][i] = analogRead(i);
+void midiMessage(int cmd, int pitch, int velocity) {
+  Serial.write(cmd);
+  Serial.write(pitch);
+  Serial.write(velocity);
+}
+
+void check_tab() {
+  if (digitalRead(TAB_2) == HIGH) {
+    current_tab = 1;
+    digitalWrite(TAB_2_LED, HIGH);
+  } else {
+    current_tab = 0;
+    digitalWrite(TAB_2_LED, LOW);
   }
-  Serial.println("tab saved");
+}
+
+void check_tempo(int tab, int i) {
+  if (digitalRead(TEMPO_BUTTON) == LOW) {
+    if (i == TEMPO_KNOB) {
+      analogWrite(CV_OUT, steps[tab][i]/4);
+    }
+    tempo = analogRead(TEMPO_KNOB) * 2;
+    current_bpm = to_bpm(tempo);
+  }
+}
+
+void output(int tab, int i, int *last, int *val) {
+  if (tab == current_tab) {
+    *val = analogRead(i);
+    digitalWrite(GATE_OUT, HIGH);
+    write_cv(last, val);
+  } else {
+    *val = steps[tab][i];
+    digitalWrite(GATE_OUT, HIGH);
+    write_cv(last, val);
+  }
+}
+
+void write_cv(int *val, int *last) {
+  if (*val != *last) {
+    *last = *val;
+    analogWrite(CV_OUT, (*val)/4);
+  }
 }
 
 void loop() {
   int last = 0;
   int val = 0;
   for (int tab = 0; tab < TABS; tab++) {
-    Serial.print("tab: ");
-    Serial.println(tab);
     for (int i = 0; i < STEPS_COUNT; i++) {
       current_step_time = timer;
       step_led(i);
-
-      if (digitalRead(TAB_2) == HIGH) {
-        current_tab = 1;
-        digitalWrite(TAB_2_LED, HIGH);
-      } else {
-        current_tab = 0;
-        digitalWrite(TAB_2_LED, LOW);
-      }
+      check_tab();
 
       if (digitalRead(SAVE_TAB) == LOW)
         read_tab_cv(current_tab);
@@ -94,33 +122,9 @@ void loop() {
         if (timer - current_step_time >= tempo)
           break;
 
-        // read tempo input
-        if (digitalRead(TEMPO_BUTTON) == LOW) {
-          if (i == TEMPO_KNOB) {
-            analogWrite(CV_OUT, steps[tab][i]/4);
-          }
-          tempo = analogRead(TEMPO_KNOB) * 2;
-          current_bpm = to_bpm(tempo);
-        }
-
-        // cv out
-        if (tab == current_tab) {
-          val = analogRead(i);
-          if (val != last) {
-            last = val;
-            analogWrite(CV_OUT, val/4);
-          }
-        } else {
-          val = steps[tab][i];
-          if (val != last) {
-            last = val;
-            analogWrite(CV_OUT, val/4);
-          }
-        }
+        check_tempo(tab, i);
+        output(tab, i, &last, &val);        
       }
-      
-      Serial.print("cv: ");
-      Serial.println(val);
     }
   }
 }

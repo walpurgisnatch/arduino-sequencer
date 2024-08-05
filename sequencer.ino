@@ -1,54 +1,94 @@
 #include "sequencer.h"
 
-#define STEPS_COUNT 5
-#define TABS 1
+#define STEPS_COUNT 3
 
 unsigned long timer;
 unsigned long current_step_time;
 
+int midi_channel = 1;
+int midi_mode = 0;
+
 // vars
-int tempo = 750;
 int current_bpm = 80;
+int current_octave = 60;
 
-int steps[TABS][STEPS_COUNT];
-int current_tab = 0;
+int steps[2][STEPS_COUNT];
 
-int to_bpm(int ms) {
-  return 60000 / ms;
+volatile byte aFlag = 0; // let's us know when we're expecting a rising edge on pinA to signal that the encoder has arrived at a detent
+volatile byte bFlag = 0; // let's us know when we're expecting a rising edge on pinB to signal that the encoder has arrived at a detent (opposite direction to when aFlag is set)
+
+int to_tempo(int bpm) {
+  return 60000 / bpm;
 }
 
-void print_tabs() {
-  for (int tab = 0; tab < TABS; tab++) {
-    Serial.print("tab: ");
-    Serial.println(tab);
-    for (int i = 0; i < STEPS_COUNT; i++) {
-      Serial.print(steps[tab][i]);
-      Serial.print(",");
-    }
-    Serial.println();
+/* void print_tabs() { */
+/*   for (int tab = 0; tab < TABS; tab++) { */
+/*     Serial.print("tab: "); */
+/*     Serial.println(tab); */
+/*     for (int i = 0; i < STEPS_COUNT; i++) { */
+/*       Serial.print(steps[tab][i]); */
+/*       Serial.print(","); */
+/*     } */
+/*     Serial.println(); */
+/*   } */
+/* } */
+
+void PinA() {
+  volatile byte value = 0;
+  cli();
+  value = PIND & 0xC; // read all eight pin values then strip away all but pinA and pinB's values
+  if(value == B00001100 && aFlag) { //check that we have both pins at detent (HIGH) and that we are expecting detent on this pin's rising edge
+    if (current_bpm > MIN_TEMPO)
+      current_bpm -= 5;
+    bFlag = 0;
+    aFlag = 0;
   }
+  else if (value == B00000100) bFlag = 1; //signal that we're expecting pinB to signal the transition to detent from free rotation
+  sei();
 }
 
-void read_tab_cv(int tab) {
-  for (int i = 0; i < STEPS_COUNT; i++) {
-    steps[tab][i] = analogRead(i);
+void PinB() {
+  volatile byte value = 0;
+  cli();
+  value = PIND & 0xC; //read all eight pin values then strip away all but pinA and pinB's values
+  if (value == B00001100 && bFlag) { //check that we have both pins at detent (HIGH) and that we are expecting detent on this pin's rising edge
+    if (current_bpm != 255)
+      current_bpm += 5;
+    bFlag = 0;
+    aFlag = 0;
   }
-  Serial.println("tab saved");
+  else if (value == B00001000) aFlag = 1; //signal that we're expecting pinA to signal the transition to detent from free rotation
+  sei();
 }
 
 void setup() {
   Serial.begin(31250);
+
+  pinMode(TEMPO_KNOB_A, INPUT_PULLUP);
+  pinMode(TEMPO_KNOB_B, INPUT_PULLUP);
+  attachInterrupt(0, PinA, RISING); // set an interrupt on PinA, looking for a rising edge signal and executing the "PinA" Interrupt Service Routine (below)
+  attachInterrupt(1, PinB, RISING); // set an interrupt on PinB, looking for a rising edge signal and executing the "PinB" Interrupt Service Routine (below)
   
-  pinMode(TEMPO_BUTTON, INPUT);
-  digitalWrite(TEMPO_BUTTON, HIGH);
+  pinMode(MIDI_MODE_SWITCH, INPUT);
 
-  pinMode(TAB_2, INPUT);
+  pinMode(SAVE, INPUT);
+  digitalWrite(SAVE, HIGH);
 
-  pinMode(SAVE_TAB, INPUT);
-  digitalWrite(SAVE_TAB, HIGH);
+  save_steps();
+}
 
-  read_tab_cv(0);
-  read_tab_cv(1);
+void check_midi_mode() {
+  if (digitalRead(MIDI_MODE_SWITCH) == LOW)
+    midi_mode = 1;
+  else
+    midi_mode = 0;
+}
+
+void save_steps() {
+  for (int i = 0; i < STEPS_COUNT; i++) {
+    steps[midi_mode][i] = analogRead(i);
+  }
+  Serial.println("tab saved");
 }
 
 void step_led(int i) {
@@ -60,70 +100,54 @@ void step_led(int i) {
   digitalWrite(i + LIGHT_STARTS, HIGH);
 }
 
-void midiMessage(int cmd, int pitch, int velocity) {
+void midi_message(int cmd, int pitch, int velocity) {
   Serial.write(cmd);
   Serial.write(pitch);
   Serial.write(velocity);
 }
 
-void check_tab() {
-  if (digitalRead(TAB_2) == HIGH) {
-    current_tab = 1;
-    digitalWrite(TAB_2_LED, HIGH);
+int midi_note(int cv) {
+  return cv/80;
+}
+
+void write_cv(int val) {
+  analogWrite(CV_OUT, val/4);
+}
+
+void output(int val, int step) {
+  if (midi_mode) {
+    midi_message(noteOn + midi_channel-1, midi_note(val), 0xf);
+    write_cv(steps[1][step]);
   } else {
-    current_tab = 0;
-    digitalWrite(TAB_2_LED, LOW);
+    write_cv(val);
+    midi_message(noteOn + midi_channel-1, midi_note(steps[0][step]), 0xf);
   }
+  digitalWrite(GATE_OUT, HIGH);
 }
 
-void check_tempo(int tab, int i) {
-  if (digitalRead(TEMPO_BUTTON) == LOW) {
-    if (i == TEMPO_KNOB) {
-      analogWrite(CV_OUT, steps[tab][i]/4);
-    }
-    tempo = analogRead(TEMPO_KNOB) * 2;
-    current_bpm = to_bpm(tempo);
-  }
-}
-
-void output(int tab, int i, int *last, int *val) {
-  if (tab == current_tab) {
-    *val = analogRead(i);
-    digitalWrite(GATE_OUT, HIGH);
-    write_cv(last, val);
-  } else {
-    *val = steps[tab][i];
-    digitalWrite(GATE_OUT, HIGH);
-    write_cv(last, val);
-  }
-}
-
-void write_cv(int *val, int *last) {
-  if (*val != *last) {
-    *last = *val;
-    analogWrite(CV_OUT, (*val)/4);
-  }
+void step_off(int val) {
+  digitalWrite(GATE_OUT, LOW);
+  midi_message(noteOff + midi_channel-1, midi_note(val), 0x00);
 }
 
 void loop() {
-  int last = 0;
   int val = 0;
-  for (int tab = 0; tab < TABS; tab++) {
-    for (int i = 0; i < STEPS_COUNT; i++) {
-      current_step_time = timer;
-      step_led(i);
-      check_tab();
+  for (int i = 0; i < STEPS_COUNT; i++) {
+    val = analogRead(i);
+    current_step_time = timer;
+    check_midi_mode();
+    step_led(i);
 
-      if (digitalRead(SAVE_TAB) == LOW)
-        read_tab_cv(current_tab);
+    if (digitalRead(SAVE) == LOW)
+      save_steps();
     
-      for(;;) {
-        timer = millis();
-        if (timer - current_step_time >= tempo)
-          break;
-
-        check_tempo(tab, i);
-        output(tab, i, &last, &val);        
+    output(val, i);
+    
+    for(;;) {
+      timer = millis();
+      if (timer - current_step_time >= to_tempo(current_bpm)) {
+        step_off(val);
+        break;
       }
     }
   }
